@@ -1,108 +1,111 @@
-# Greywater Quality Monitor
+# Greywater filtration monitor
 
-A sensor unit that sits at the outlet of a multi-stage greywater filter and reports whether the treated water is suitable for reuse on plants. Built on a Raspberry Pi Pico W during the JEI Summer School at Hubei University, Wuhan, as part of an international team project that placed third.
+A Raspberry Pi Pico that watches water going through a 4-stage greywater filter and only lets it into the collection tank (for reuse on plants) when it looks safe. A desktop dashboard shows the readings live, graphs them, logs them and can lock or unlock the outlet valve.
 
-The chemistry students on the team designed the filter stages. My part was the sensing and verification: choosing and calibrating the sensors, wiring the unit, writing the firmware, and deciding how to turn the readings into a clear "use it / don't use it" answer. The water was intended for irrigation only, never for drinking, and the thresholds reflect that.
+![Dashboard](docs/dashboard.png)
 
-![Filter outlet readings with reuse bands](docs/water_quality.png)
+*The dashboard in CONTAM demo mode (simulated dirty water, hence the yellow banner): filtered pH has dropped out of the green band and the estimated turbidity is over 10 NTU, so it says UNSAFE, the valve is drawn red (forced shut) and the alert is logged. In LIVE mode the same screen shows the Pico's readings and probe voltages.*
 
-## What it does
+## How it works
 
-- **Measures six things** every 20 s: pH, turbidity, total dissolved solids (TDS), water temperature, the output of the UV sterilising lamp, and the flow rate and volume through the outlet valve.
-- **Classifies each sample** as PASS, CAUTION or FAIL against irrigation-water guidelines (FAO and WHO greywater reuse guidance, simplified into bands). A PASS also requires the UV lamp to be working, because clear-looking water that has not been disinfected is still not safe to put on food plants.
-- **Explains the verdict** with short reasons such as "turbidity caution" or "UV lamp weak or off", shown on the serial console and stored in the log.
-- **Logs locally** to the Pico's flash and **uploads to a ThingSpeak dashboard** over Wi-Fi when credentials are present. Credentials live in a `secrets.py` that is excluded from git.
-- **Signals on the LED:** one blink per sample for PASS, two for CAUTION, steady on for FAIL.
+1. Greywater goes in, past a **pH probe** and a **turbidity sensor** on the intake.
+2. It runs through the 4-stage filter.
+3. A second **pH probe** checks the filtered water.
+4. If the filtered water is safe, and the valve has been unlocked (button or dashboard), a **servo valve** opens to the collection tank. If it turns unsafe, the valve shuts straight away and the buzzer goes off (see below).
 
-`analysis/plot_log.py` draws a log with the pass, caution and fail bands behind each trace, plus a verdict timeline, and prints how much of the run passed and why samples failed.
+**Safe** means filtered pH between 6.9 and 7.8 and filtered turbidity under 10 NTU.
 
-![Verdict over the run](docs/verdict.png)
+The Pico also shows pH (with the safe band), turbidity and SAFE/UNSAFE on a 128×64 OLED, and lights the safe LED when the water is safe.
+
+![OLED screen, safe and unsafe](docs/oled.png)
+
+*The OLED, drawn by the firmware's own `draw()` code (rendered on a PC, not a photo). The bar is pH 5 to 9 with the safe band marked under it. Top right: `V` valve open, `L` locked by the user, `X` shut because the water is unsafe.*
+
+## Buzzer and LEDs
+
+The buzzer is there so you don't have to watch the screen. It only makes noise when something changes:
+
+| What happened | Buzzer | Serial message |
+|---|---|---|
+| Water goes from safe to unsafe | 3 short beeps | `ALERT: unsafe water, valve closed` |
+| Still unsafe | 1 longer beep every 15 s | `ALERT: still unsafe` |
+| Back in range | 1 short chirp | `OK: water back in range` |
+| Lock button pressed / LOCK or UNLOCK sent | tiny click | `Action: LOCKED` / `Action: UNLOCKED` |
+
+It doesn't beep the whole time the water is bad, because that just gets switched off at the wall. The reminder every 15 s is so it can't be forgotten about either.
+
+The beeps are non-blocking. My first version did `buzzer on, sleep, buzzer off` inside the loop, which froze the sensors and the button while it beeped (and it only lasted 10 ms, so you could barely hear it). Now each pattern is a list of on/off times that the main loop steps through, so readings keep going at 10 Hz while it beeps.
+
+LEDs: the safe LED (GP20) is on when the water is safe; the lock LED (GP19) is on when the valve is locked by the user. The dashboard's **Pico alerts / buzzer** panel shows the same messages with a timestamp, so you can see what it beeped about after the fact.
+
+## What's real and what isn't
+
+- **Measured:** intake pH, outtake pH, intake turbidity.
+- **Estimated:** outtake turbidity. There's only one turbidity sensor, so the outlet value assumes the filter removes 85 %. It's labelled as an estimate everywhere.
+- **Not fitted yet:** TDS (total dissolved solids). The dashboard shows STANDBY in live mode.
+- **Demo modes:** the dashboard can make up data to show it without the rig: NORMAL (clean water), CONTAM (dirty water) and CALIB (sliders for the filtered pH and turbidity, handy for checking the safety logic). It puts a banner on screen and writes the mode into every log row, so demo data can't be mistaken for readings. The CSV logs from the project that are just smooth repeating waves were from the simulator, not the rig, so they're not in this repo.
 
 ## Hardware
 
-| Part | Notes |
+| Pico pin | Connected to |
 |---|---|
-| Raspberry Pi Pico W | MicroPython, Wi-Fi to ThingSpeak |
-| ADS1115 16-bit ADC (I2C) | The Pico has only three analogue inputs and the pH probe needs better resolution than its 12-bit ADC |
-| pH probe with analogue board | Two-point calibrated in pH 4 and pH 7 buffers |
-| Turbidity sensor (DFRobot SEN0189) | Calibrated against clear water and a 100 NTU standard |
-| TDS probe (Gravity TDS meter) | Manufacturer's cubic fit with 2 %/°C temperature compensation |
-| UV sensor (GUVA-S12SD) | Mounted at the UV sterilising stage to confirm the lamp is actually producing UV |
-| DS18B20 waterproof probe | Water temperature, also used for TDS compensation |
-| YF-S201 hall-effect flow sensor | At the outlet valve, 450 pulses per litre |
+| GP26 (ADC) | Turbidity sensor, intake |
+| GP27 (ADC) | pH probe, outtake |
+| GP28 (ADC) | pH probe, intake |
+| GP22 | Valve servo (50 Hz) |
+| GP21 | Lock button (to 3V3, pulled down) |
+| GP20 | "Safe" LED |
+| GP19 | "Locked" LED |
+| GP18 | Buzzer |
+| GP4 / GP5 | OLED SDA / SCL (I2C0) |
 
-Wiring: ADS1115 on GP4 (SDA) and GP5 (SCL); DS18B20 on GP16; flow sensor on GP17. Analogue sensors are powered from 5 V and read through the ADS1115 at a 6.144 V full-scale range so they cannot clip.
+The real screen is an SH1106. In the Wokwi simulator it falls back to an SSD1306, which is why `ssd1306.py` is included.
 
-## Software
-
-- Firmware: MicroPython 1.22 or newer on the Pico W. Uses the built-in `onewire`, `ds18x20`, `network` and `urequests` modules; the ADS1115 driver is included.
-- Analysis: Python 3.10 or newer with `matplotlib`.
+## Files
 
 ```
-firmware/
-  main.py              read, classify, log, upload, repeat
-  sensors.py           voltage-to-value conversions, DS18B20, flow meter
-  quality.py           thresholds and the PASS / CAUTION / FAIL decision (shared with analysis)
-  ads1115.py           minimal ADS1115 driver
-  thingspeak.py        Wi-Fi connect and channel update
-  logger.py            CSV log on the Pico
-  config.py            pins, calibration constants, periods
-  secrets_example.py   template for Wi-Fi and ThingSpeak credentials
-analysis/
-  plot_log.py          plots and summary for a log
-  test_quality.py      checks for the conversions and the classifier
-  example_data.py      generates data/example_log.csv (a scripted bench-test scenario)
-data/
-  example_log.csv      generated example, not a measurement
-docs/                  images for this README
+firmware/main.py          runs on the Pico
+firmware/ssd1306.py       OLED driver (from MicroPython, MIT licence)
+tools/sensor_check.py     prints every sensor's voltage, for wiring checks and calibration
+tools/calibrate_ph.py     turns buffer readings into calibration constants (runs on a PC)
+gui/dashboard.py          desktop dashboard
+gui/requirements.txt
+docs/                     pictures for this page
 ```
 
-## How to run
+**Pico:** copy `firmware/main.py` and the OLED driver to the Pico. Run `tools/sensor_check.py` first if you've just wired it.
 
-**On the Pico**
+**Dashboard:** `pip install -r gui/requirements.txt`, then `python gui/dashboard.py`. It finds the Pico by itself and logs to `differential_filtration_log.csv` once a second.
 
-1. Flash MicroPython to the Pico W.
-2. Copy `firmware/secrets_example.py` to `secrets.py`, fill in the Wi-Fi details and ThingSpeak write key (or leave the key empty to log locally only).
-3. Copy every file in `firmware/` plus `secrets.py` to the Pico (Thonny: *File > Save as > Raspberry Pi Pico*).
-4. Calibrate: put the pH probe in pH 7 and pH 4 buffers and note the voltages printed on the console, then enter them in `config.py`. Do the same for the turbidity sensor with clear water and a 100 NTU standard.
-5. Power up. `main.py` starts automatically and prints one line per sample.
+## Serial messages
 
-**On a PC**
+Pico → PC, once every 100 ms:
 
-```bash
-git clone https://github.com/siamct/greywater-quality-monitor.git
-cd greywater-quality-monitor/analysis
-pip install -r requirements.txt
-python test_quality.py                 # checks the conversions and the classifier
-python plot_log.py path/to/log.csv     # or no argument for the example data
+```
+ph_in, ph_out, turb_in, turb_out_est, valve_open, safe, v_ph_in, v_ph_out, v_turb
 ```
 
-## Thresholds
+Plus the text lines from the buzzer table above. PC → Pico: `LOCK` or `UNLOCK`.
 
-| Measurement | PASS | CAUTION | FAIL |
-|---|---|---|---|
-| pH | 6.5 to 8.4 | 6.0 to 9.0 | outside |
-| Turbidity | under 5 NTU | 5 to 10 NTU | over 10 NTU |
-| TDS | under 450 ppm | 450 to 2000 ppm | over 2000 ppm |
-| Temperature | 5 to 35 °C | 2 to 40 °C | outside |
-| UV lamp | above 0.8 V at the sensor | lamp off downgrades PASS to CAUTION | |
+## Calibration
 
-The overall verdict is the worst individual band.
+pH is worked out as `slope × volts + offset`, with separate constants for each probe (`PH_IN_CAL`, `PH_OUT_CAL`). To recalibrate, put a probe in buffer solutions of known pH, read the voltage with `sensor_check.py`, and run:
 
-## Results
+```
+python tools/calibrate_ph.py 6.86=2.12 7.2=2.33 9.18=2.38
+```
 
-The plots above are from a scripted bench-test scenario in `analysis/example_data.py`: tap water, then washing-up water through the filter, a period with the UV lamp switched off, and a slug of soil that the filter clears. They show the kind of record the unit produces and how the verdict responds; they are not measurements from Wuhan.
+Those are my actual readings from one probe, and they show a problem: the pH 9.18 buffer only read 0.05 V higher than the 7.2 one, so the straight-line fit is off by more than 1 pH there. Either the probe was slow to settle, or it needs cleaning or replacing. Readings above about 7.5 shouldn't be trusted until it's recalibrated.
 
-During the summer school the unit ran on the team's filter rig with washing-up and hand-basin water. Treated water came out in the PASS band for irrigation on pH and turbidity, with TDS usually in the caution band because detergent residue is not removed by sand and carbon stages. The team placed third in the final judging.
+## Tidied up after the project
 
-## What I learned
+The project grew through a lot of small test scripts written against a deadline. Since then I've merged them and cleaned things up:
 
-- **Calibrate in the water you will measure.** The pH and turbidity sensors shipped with "typical" curves that were well off for our probes. Two-point calibration in buffers took ten minutes and removed a whole pH unit of error.
-- **TDS needs temperature compensation.** Conductivity rises about 2 % per degree, so without the DS18B20 the TDS reading drifted with the weather rather than with the water.
-- **Clear is not clean.** Turbidity and TDS say nothing about microbes. Reading the UV lamp's actual output and refusing to say PASS without it was the most important decision in the classifier.
-- **Give a verdict, not just numbers.** The people using the rig wanted a yes or no. Bands and a one-line reason were far more useful than a dashboard of raw values.
-- **Keep secrets out of the repo.** Wi-Fi and API keys live in a file git never sees, with a committed example to copy.
-
-## Licence
-
-MIT. See [LICENSE](LICENSE).
+- **Fixed a valve bug.** In the original, if the water stayed unsafe, the valve opened again on the very next loop. Now it stays shut until the water is safe again *and* the valve is unlocked.
+- The dashboard's **valve button actually works**: it sends LOCK/UNLOCK to the Pico, and the Pico reports the real valve state back.
+- Calibration constants and safety limits are named in one place, the button doesn't block the loop, and the serial reader ignores alerts and garbled lines.
+- The dashboard reads serial on a background thread without touching the GUI from it, only connects to the Pico (not whatever port is first), and shows the Pico's real voltages instead of guessing them back from the pH.
+- Demo data is clearly marked, and the log is written once a second with a mode column instead of 20 times a second with no way to tell real from demo.
+- The buzzer no longer blocks the loop, and it has distinct patterns for unsafe / still unsafe / recovered / button (it used to be one 10 ms beep).
+- The dashboard keeps my original layout (diagnostics panel, OLED-style bars, topology drawing) but the safe band is shaded on the graphs, the topology scales to the window instead of being cut off, and there's an alerts panel.
+- The safety status is checked on the newest reading, not the smoothed one, so the dashboard doesn't say SAFE for a second after the Pico has already shut the valve.
