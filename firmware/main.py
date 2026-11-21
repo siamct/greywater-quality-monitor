@@ -53,6 +53,7 @@ SERVO_OPEN = 4000
 
 LOOP_MS = 100
 DEBOUNCE_MS = 250
+UNSAFE_REMINDER_MS = 15000            # keep nagging while the water is bad
 SAMPLES = 10
 VOLTS_PER_COUNT = 3.3 / 65535
 
@@ -136,10 +137,45 @@ def draw(r, safe, valve_open, locked):
     oled.show()
 
 
-def beep(ms=60):
-    buzzer.value(1)
-    utime.sleep_ms(ms)
-    buzzer.value(0)
+class Buzzer:
+    """Non-blocking beeper. A pattern is a list of (on_ms, off_ms) pairs that
+    gets played out a step at a time from the main loop, so beeping never
+    stalls the sensor readings or the button (the old version used sleep_ms).
+
+    What it does:
+        water goes unsafe      3 short beeps
+        still unsafe           1 reminder beep every UNSAFE_REMINDER_MS
+        water back in range    1 short chirp
+        button / LOCK command  10 ms click so you know it registered
+    """
+
+    ALARM = [(80, 80), (80, 80), (80, 0)]
+    REMINDER = [(150, 0)]
+    RECOVERED = [(30, 0)]
+    CLICK = [(10, 0)]
+
+    def __init__(self, pin):
+        self.pin = pin
+        self.steps = []
+        self.step_end = 0
+        self.on = False
+
+    def play(self, pattern):
+        self.steps = list(pattern)
+        self.step_end = 0
+        self.on = False
+
+    def update(self, now):
+        if utime.ticks_diff(now, self.step_end) < 0:
+            return                                  # current on/off step still running
+        if self.on:                                 # finished an "on" -> do its "off" gap
+            self.on = False
+            self.pin.value(0)
+            self.step_end = utime.ticks_add(now, self.steps.pop(0)[1])
+        elif self.steps:                            # start the next beep
+            self.on = True
+            self.pin.value(1)
+            self.step_end = utime.ticks_add(now, self.steps[0][0])
 
 
 class Monitor:
@@ -149,6 +185,8 @@ class Monitor:
         self.valve_open = False
         self.last_press = 0
         self.button_was_down = False
+        self.buzzer = Buzzer(buzzer)
+        self.last_reminder = 0
         self.poll = select.poll()
         self.poll.register(sys.stdin, select.POLLIN)
         self.set_valve(False)
@@ -161,6 +199,7 @@ class Monitor:
     def set_locked(self, locked):
         self.locked = locked
         lock_led.value(1 if locked else 0)
+        self.buzzer.play(Buzzer.CLICK)
         print("Action: " + ("LOCKED" if locked else "UNLOCKED"))
 
     def check_button(self):
@@ -183,12 +222,22 @@ class Monitor:
         self.check_button()
         self.check_serial()
 
+        now = utime.ticks_ms()
         r = read_sensors()
         safe = is_safe(r)
         if self.was_safe and not safe:
             print("ALERT: unsafe water, valve closed")
-            beep()
+            self.buzzer.play(Buzzer.ALARM)
+            self.last_reminder = now
+        elif not safe and utime.ticks_diff(now, self.last_reminder) > UNSAFE_REMINDER_MS:
+            print("ALERT: still unsafe")
+            self.buzzer.play(Buzzer.REMINDER)
+            self.last_reminder = now
+        elif safe and not self.was_safe:
+            print("OK: water back in range")
+            self.buzzer.play(Buzzer.RECOVERED)
         self.was_safe = safe
+        self.buzzer.update(now)
 
         # Valve opens only when the user has unlocked it AND the water is safe.
         self.set_valve(safe and not self.locked)
